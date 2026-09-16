@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import DockDwightLib
 import Foundation
 
@@ -6,6 +7,7 @@ import Foundation
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let dwight = DesktopDwightController()
     private var hotKey: HotKeyController?
+    private var settingsHotKey: HotKeyController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -15,6 +17,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         self.hotKey = hotKey
         _ = hotKey.register()
+        let settingsHotKey = HotKeyController(keyCode: UInt32(kVK_ANSI_Comma), id: 2) { [weak self] in
+            DispatchQueue.main.async { self?.dwight.showSettings() }
+        }
+        self.settingsHotKey = settingsHotKey
+        _ = settingsHotKey.register()
     }
 }
 
@@ -37,4 +44,3 @@ app.setActivationPolicy(.accessory)
 private let delegate = MainActor.assumeIsolated { AppDelegate() }
 app.delegate = delegate
 app.run()
-
