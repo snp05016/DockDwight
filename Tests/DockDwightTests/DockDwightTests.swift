@@ -43,4 +43,42 @@ final class DockDwightTests: XCTestCase {
             66
         )
     }
+
+    func testFocusModeFlagsConfiguredDistraction() {
+        let reaction = ContextualReactionEngine.reaction(
+            bundleIdentifier: "com.valvesoftware.steam",
+            appName: "Steam",
+            focusMode: true,
+            distractingApps: ["Steam", "Discord"]
+        )
+        XCTAssertEqual(reaction?.state, .focusWarning)
+        XCTAssertTrue(reaction?.message.contains("FOCUS BREACH") == true)
+    }
+
+    func testXcodeGetsBuildInspectionReaction() {
+        let reaction = ContextualReactionEngine.reaction(
+            bundleIdentifier: "com.apple.dt.Xcode",
+            appName: "Xcode",
+            focusMode: false,
+            distractingApps: []
+        )
+        XCTAssertEqual(reaction?.state, .inspecting)
+        XCTAssertEqual(reaction?.source, "Xcode")
+    }
+
+    func testUnknownAppDoesNotInterruptPatrol() {
+        XCTAssertNil(ContextualReactionEngine.reaction(
+            bundleIdentifier: "com.example.tool",
+            appName: "Tool",
+            focusMode: false,
+            distractingApps: []
+        ))
+    }
+
+    func testWeatherClassification() {
+        XCTAssertEqual(WeatherMood.classify(code: 0), .clear)
+        XCTAssertEqual(WeatherMood.classify(code: 63), .rain)
+        XCTAssertEqual(WeatherMood.classify(code: 75), .snow)
+        XCTAssertEqual(WeatherMood.classify(code: 96), .storm)
+    }
 }

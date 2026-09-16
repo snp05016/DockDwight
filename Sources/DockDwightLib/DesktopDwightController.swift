@@ -3,14 +3,34 @@ import CoreFoundation
 import SwiftUI
 
 @MainActor
-public final class DesktopDwightController {
+public final class DesktopDwightController: NSObject {
     public static let panelSize = CGSize(width: 300, height: 210)
 
     private let model = DwightViewModel()
+    private let settings = CompanionSettings.shared
+    private let activityLog = ActivityLogStore()
+    private lazy var feedback = CompanionFeedback(settings: settings)
+    private lazy var contextMonitor = ContextMonitor(settings: settings)
+    private lazy var settingsWindow = CompanionSettingsWindowController(
+        settings: settings,
+        log: activityLog,
+        actions: .init(
+            speak: { [weak self] in self?.speakNow() },
+            beetDrill: { [weak self] in self?.startBeetDrill() },
+            resetPlacement: { [weak self] in self?.resetToAutomaticPlacement() },
+            showVisitor: { [weak self] in self?.showVisitor() },
+            startFocus: { [weak self] in self?.startFocusSession() },
+            hide: { [weak self] in self?.hide() }
+        )
+    )
     private var panel: NSPanel?
     private var movementTimer: Timer?
     private var quoteWorkItem: DispatchWorkItem?
     private var quoteHideWorkItem: DispatchWorkItem?
+    private var stateResetWorkItem: DispatchWorkItem?
+    private var visitorWorkItem: DispatchWorkItem?
+    private var dockAuditWorkItem: DispatchWorkItem?
+    private var beetWorkItem: DispatchWorkItem?
     private var patrol = PatrolState(x: 0)
     private var lastTick = Date()
     private var frameAccumulator: TimeInterval = 0
@@ -24,21 +44,34 @@ public final class DesktopDwightController {
     private var gestureStartOrigin = CGPoint.zero
     private var gestureStartScale: CGFloat = 1
     private var isInteracting = false
+    private var lastReactionSource: String?
+    private var lastReactionDate = Date.distantPast
+    private var focusSessionEnd: Date?
     private(set) public var isVisible = true
 
-    public init() {}
+    public override init() { super.init() }
 
     public func start() {
         let panel = makePanel()
         self.panel = panel
         restoreOrPlaceAtPatrolStart(panel)
         panel.orderFrontRegardless()
+        model.accessory = settings.accessory
+        model.statusText = DwightActivityState.walking.label
         startMovement()
         scheduleNextQuote(initial: true)
+        configureContextMonitor()
+        contextMonitor.start()
+        scheduleVisitor(initial: true)
+        scheduleDockAudit(initial: true)
     }
 
     public func toggleVisibility() {
         isVisible ? hide() : show()
+    }
+
+    public func showSettings() {
+        settingsWindow.show()
     }
 
     public func hide() {
@@ -56,19 +89,9 @@ public final class DesktopDwightController {
 
     public func speakNow() {
         guard isVisible else { return }
-        quoteIndex = (quoteIndex + Int.random(in: 1...DwightQuoteBook.quotes.count - 1)) % DwightQuoteBook.quotes.count
-        let quote = DwightQuoteBook.quote(at: quoteIndex, excluding: model.quote)
-        pauseUntil = Date().addingTimeInterval(5.8)
-        model.isPaused = true
-        model.quote = quote
-        quoteHideWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.model.quote = nil
-            self.model.isPaused = false
-        }
-        quoteHideWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.8, execute: work)
+        quoteIndex += Int.random(in: 1...9)
+        let quote = DwightQuoteBook.quote(seed: quoteIndex, intensity: settings.personality, excluding: model.quote)
+        present(message: quote, state: .talking, source: "Dwight", duration: 5.8)
     }
 
     private func makePanel() -> NSPanel {
@@ -88,12 +111,14 @@ public final class DesktopDwightController {
         panel.contentView = NSHostingView(rootView: DwightView(
             model: model,
             onSpeak: { [weak self] in self?.speakNow() },
-            onHide: { [weak self] in self?.hide() },
+            onHide: { [weak self] in self?.showContextMenu() },
             onReset: { [weak self] in self?.resetToAutomaticPlacement() },
             onGestureBegan: { [weak self] resize, point in self?.beginGesture(resize: resize, pointer: point) },
             onGestureChanged: { [weak self] resize, point in self?.updateGesture(resize: resize, pointer: point) },
             onGestureEnded: { [weak self] resize, point in self?.endGesture(resize: resize, pointer: point) },
-            onScroll: { [weak self] delta in self?.resizeByScroll(delta) }
+            onScroll: { [weak self] delta in self?.resizeByScroll(delta) },
+            onSettings: { [weak self] in self?.settingsWindow.show() },
+            onBeetTap: { [weak self] in self?.handleBeetTap() }
         ))
         panel.setContentSize(Self.panelSize)
         return panel
@@ -140,7 +165,7 @@ public final class DesktopDwightController {
 
     private func patrolBounds(in frame: CGRect) -> ClosedRange<CGFloat> {
         let rightEdge = frame.maxX - Self.panelSize.width + 48
-        let leftEdge = max(frame.midX + 40, rightEdge - 430)
+        let leftEdge = max(frame.minX, rightEdge - CGFloat(settings.patrolWidth))
         return leftEdge...max(leftEdge + 1, rightEdge)
     }
 
@@ -163,6 +188,7 @@ public final class DesktopDwightController {
         }
         guard let screen = targetScreen else { return }
         let now = Date()
+        updateFocusCountdown(now: now)
         let delta = min(0.1, now.timeIntervalSince(lastTick))
         lastTick = now
         let displayID = displayID(for: screen)
@@ -171,8 +197,10 @@ public final class DesktopDwightController {
             activeDisplayID = displayID
             let bounds = patrolBounds(in: screen.frame)
             patrol.x = patrol.direction == .right ? bounds.lowerBound : bounds.upperBound
+            triggerDisplayTransfer()
         }
         updateDockHeight(for: screen)
+        model.accessory = settings.accessory
         guard !isInteracting else { return }
         panel.setFrameOrigin(CGPoint(x: patrol.x, y: usesManualPlacement ? manualY : screen.frame.minY))
         guard isVisible, now >= pauseUntil else { return }
@@ -185,7 +213,7 @@ public final class DesktopDwightController {
         } else {
             bounds = patrolBounds(in: screen.frame)
         }
-        let next = PatrolEngine.step(state: patrol, deltaTime: delta, speed: 31, bounds: bounds)
+        let next = PatrolEngine.step(state: patrol, deltaTime: delta, speed: CGFloat(settings.walkingSpeed), bounds: bounds)
         patrol = next
         model.direction = next.direction
         frameAccumulator += delta
@@ -227,6 +255,12 @@ public final class DesktopDwightController {
         gestureStartPointer = pointer
         gestureStartOrigin = panel.frame.origin
         gestureStartScale = model.userScale
+        if !resize {
+            model.activityState = .carried
+            model.statusText = DwightActivityState.carried.label
+            model.effectPulse += 1
+            feedback.play(for: .carried)
+        }
     }
 
     private func updateGesture(resize: Bool, pointer: CGPoint) {
@@ -255,6 +289,13 @@ public final class DesktopDwightController {
         isInteracting = false
         pauseUntil = Date().addingTimeInterval(0.7)
         model.isPaused = false
+        if !resize {
+            model.activityState = .landing
+            model.statusText = DwightActivityState.landing.label
+            model.effectPulse += 1
+            feedback.play(for: .landing)
+            scheduleStateReset(after: 0.75)
+        }
     }
 
     private func resizeByScroll(_ delta: CGFloat) {
@@ -280,12 +321,13 @@ public final class DesktopDwightController {
         UserDefaults.standard.removeObject(forKey: "dwightY")
         UserDefaults.standard.set(1.0, forKey: "dwightScale")
         placeAtAutomaticStart(panel)
-        speakNow()
+        present(message: "AUTOMATIC PATROL PARAMETERS RESTORED.", state: .celebrating, source: "Placement", duration: 3.5)
     }
 
     private func scheduleNextQuote(initial: Bool = false) {
         quoteWorkItem?.cancel()
-        let delay = initial ? 1.4 : Double.random(in: 28...52)
+        let center = 52 - settings.personality * 30
+        let delay = initial ? 1.4 : max(12, center + Double.random(in: -8...10))
         let work = DispatchWorkItem { [weak self] in
             self?.speakNow()
             self?.scheduleNextQuote()
@@ -293,6 +335,226 @@ public final class DesktopDwightController {
         quoteWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
+
+    private func configureContextMonitor() {
+        contextMonitor.onReaction = { [weak self] reaction in self?.handle(reaction) }
+        contextMonitor.onIdleChanged = { [weak self] idle in self?.handleIdleChange(idle) }
+        contextMonitor.onWeather = { [weak self] mood, temperature in
+            self?.model.weatherMood = mood
+            self?.model.temperature = temperature
+        }
+    }
+
+    private func handle(_ reaction: CompanionReaction) {
+        guard settings.reactionsEnabled else { return }
+        if reaction.source == lastReactionSource, Date().timeIntervalSince(lastReactionDate) < 12 { return }
+        lastReactionSource = reaction.source
+        lastReactionDate = Date()
+        present(message: reaction.message, state: reaction.state, source: reaction.source, duration: reaction.duration)
+    }
+
+    private func present(message: String, state: DwightActivityState, source: String, duration: TimeInterval) {
+        guard isVisible else { return }
+        pauseUntil = Date().addingTimeInterval(duration)
+        model.isPaused = state != .celebrating
+        model.activityState = state
+        model.statusText = state.label
+        model.quote = message
+        model.effectPulse += 1
+        feedback.play(for: state)
+        activityLog.record(source: source, message: message)
+        quoteHideWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.model.quote = nil
+            self.model.isPaused = false
+            if self.model.activityState != .sleeping && !self.model.miniGameActive {
+                self.model.activityState = .walking
+                self.model.statusText = DwightActivityState.walking.label
+            }
+        }
+        quoteHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    private func handleIdleChange(_ idle: Bool) {
+        if idle {
+            quoteHideWorkItem?.cancel()
+            model.quote = nil
+            model.isPaused = true
+            model.activityState = .sleeping
+            model.statusText = DwightActivityState.sleeping.label
+            pauseUntil = .distantFuture
+            activityLog.record(source: "Idle", message: "Night watch initiated.")
+        } else if model.activityState == .sleeping {
+            pauseUntil = Date().addingTimeInterval(3.6)
+            present(message: "YOU HAVE RETURNED. THE PERIMETER REMAINED SECURE.", state: .celebrating, source: "Idle", duration: 3.6)
+        }
+    }
+
+    private func triggerDisplayTransfer() {
+        guard !usesManualPlacement else { return }
+        model.activityState = .observing
+        model.statusText = "DISPLAY TRANSFER"
+        model.effectPulse += 1
+        scheduleStateReset(after: 0.8)
+    }
+
+    private func scheduleStateReset(after delay: TimeInterval) {
+        stateResetWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.model.activityState != .sleeping, !self.model.miniGameActive else { return }
+            self.model.activityState = .walking
+            self.model.statusText = DwightActivityState.walking.label
+            self.model.isPaused = false
+        }
+        stateResetWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func startBeetDrill() {
+        show()
+        beetWorkItem?.cancel()
+        pauseUntil = Date().addingTimeInterval(12)
+        model.isPaused = true
+        model.miniGameActive = true
+        model.beetScore = 0
+        model.activityState = .beetDrill
+        model.statusText = "CLICK DWIGHT: HARVEST BEETS"
+        model.effectPulse += 1
+        feedback.play(for: .beetDrill)
+        activityLog.record(source: "Beet Drill", message: "Twelve-second harvesting drill started.")
+        let work = DispatchWorkItem { [weak self] in self?.finishBeetDrill() }
+        beetWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: work)
+    }
+
+    private func handleBeetTap() {
+        guard model.miniGameActive else {
+            startBeetDrill()
+            return
+        }
+        model.beetScore += 1
+        model.effectPulse += 1
+        feedback.play(for: .beetDrill)
+        if model.beetScore >= 10 { finishBeetDrill() }
+    }
+
+    private func finishBeetDrill() {
+        guard model.miniGameActive else { return }
+        beetWorkItem?.cancel()
+        model.miniGameActive = false
+        let score = model.beetScore
+        present(
+            message: score >= 10 ? "BEET HARVEST COMPLETE. EXEMPLARY." : "BEET DRILL ENDED. SCORE: \(score).",
+            state: score >= 10 ? .celebrating : .inspecting,
+            source: "Beet Drill",
+            duration: 4.2
+        )
+    }
+
+    private func scheduleVisitor(initial: Bool = false) {
+        visitorWorkItem?.cancel()
+        let delay = initial ? 12 : Double.random(in: 90...220)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.settings.visitorsEnabled { self.showVisitor() }
+            self.scheduleVisitor()
+        }
+        visitorWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func scheduleDockAudit(initial: Bool = false) {
+        dockAuditWorkItem?.cancel()
+        let delay = initial ? 48 : Double.random(in: 160...340)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.settings.reactionsEnabled,
+               Double.random(in: 0...1) <= max(0.25, self.settings.personality),
+               let app = self.dockApplicationNames().randomElement() {
+                self.present(
+                    message: "AUDITING THE \(app.uppercased()) DOCK STATION.",
+                    state: .observing,
+                    source: "Dock",
+                    duration: 3.6
+                )
+            }
+            self.scheduleDockAudit()
+        }
+        dockAuditWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func dockApplicationNames() -> [String] {
+        guard let entries = CFPreferencesCopyAppValue("persistent-apps" as CFString, "com.apple.dock" as CFString) as? [[String: Any]] else { return [] }
+        return entries.compactMap { entry in
+            let data = entry["tile-data"] as? [String: Any]
+            return data?["file-label"] as? String
+        }
+    }
+
+    private func showVisitor() {
+        guard settings.visitorsEnabled else { return }
+        let visitor = VisitorKind.allCases.randomElement() ?? .cat
+        model.visitor = visitor
+        model.effectPulse += 1
+        activityLog.record(source: "Visitor", message: visitor.label)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.model.visitor = nil }
+    }
+
+    private func startFocusSession() {
+        settings.focusMode = true
+        focusSessionEnd = Date().addingTimeInterval(settings.focusDurationMinutes * 60)
+        present(
+            message: "TIMED FOCUS PATROL ENGAGED FOR \(Int(settings.focusDurationMinutes)) MINUTES.",
+            state: .observing,
+            source: "Focus",
+            duration: 4
+        )
+    }
+
+    private func updateFocusCountdown(now: Date) {
+        guard let focusSessionEnd else { return }
+        let remaining = focusSessionEnd.timeIntervalSince(now)
+        if remaining <= 0 {
+            self.focusSessionEnd = nil
+            settings.focusMode = false
+            present(message: "FOCUS PATROL COMPLETE. PRODUCTIVITY VERIFIED.", state: .celebrating, source: "Focus", duration: 4.5)
+        } else if model.activityState == .walking {
+            let minutes = Int(ceil(remaining / 60))
+            model.statusText = "FOCUS PATROL • \(minutes) MIN"
+        }
+    }
+
+    private func showContextMenu() {
+        let menu = NSMenu(title: "DockDwight")
+        menu.addItem(withTitle: "Schrute Command Center…", action: #selector(openSettings), keyEquivalent: "")
+        menu.addItem(withTitle: "Make a Declaration", action: #selector(declare), keyEquivalent: "")
+        menu.addItem(withTitle: "Start Beet Drill", action: #selector(beetDrillMenuAction), keyEquivalent: "")
+        menu.addItem(withTitle: "Summon Visitor", action: #selector(visitorMenuAction), keyEquivalent: "")
+        let focus = menu.addItem(withTitle: "Focus Supervisor", action: #selector(toggleFocus), keyEquivalent: "")
+        focus.state = settings.focusMode ? .on : .off
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Reset Position & Size", action: #selector(resetMenuAction), keyEquivalent: "")
+        menu.addItem(withTitle: "Hide Dwight", action: #selector(hideMenuAction), keyEquivalent: "")
+        menu.addItem(withTitle: "Quit DockDwight", action: #selector(quitMenuAction), keyEquivalent: "")
+        menu.items.forEach { $0.target = self }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    @objc private func openSettings() { settingsWindow.show() }
+    @objc private func declare() { speakNow() }
+    @objc private func beetDrillMenuAction() { startBeetDrill() }
+    @objc private func visitorMenuAction() { showVisitor() }
+    @objc private func toggleFocus() {
+        settings.focusMode.toggle()
+        if !settings.focusMode { focusSessionEnd = nil }
+        present(message: settings.focusMode ? "FOCUS SUPERVISOR ENGAGED." : "FOCUS SUPERVISOR STOOD DOWN.", state: .observing, source: "Focus", duration: 3.2)
+    }
+    @objc private func resetMenuAction() { resetToAutomaticPlacement() }
+    @objc private func hideMenuAction() { hide() }
+    @objc private func quitMenuAction() { NSApp.terminate(nil) }
 }
 
 private extension Double {

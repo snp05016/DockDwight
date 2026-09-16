@@ -5,9 +5,19 @@ public final class HotKeyController: @unchecked Sendable {
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
     private let action: () -> Void
-    private let hotKeyID = EventHotKeyID(signature: 0x44574754, id: 1) // DWGT
+    private let hotKeyID: EventHotKeyID
+    private let keyCode: UInt32
+    private let modifiers: UInt32
 
-    public init(action: @escaping () -> Void) {
+    public init(
+        keyCode: UInt32 = UInt32(kVK_ANSI_D),
+        modifiers: UInt32 = UInt32(controlKey | optionKey),
+        id: UInt32 = 1,
+        action: @escaping () -> Void
+    ) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+        self.hotKeyID = EventHotKeyID(signature: 0x44574754, id: id) // DWGT
         self.action = action
     }
 
@@ -22,8 +32,10 @@ public final class HotKeyController: @unchecked Sendable {
                 guard let event, let userData else { return OSStatus(eventNotHandledErr) }
                 var receivedID = EventHotKeyID()
                 let result = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &receivedID)
-                guard result == noErr, receivedID.signature == 0x44574754, receivedID.id == 1 else { return OSStatus(eventNotHandledErr) }
                 let controller = Unmanaged<HotKeyController>.fromOpaque(userData).takeUnretainedValue()
+                guard result == noErr,
+                      receivedID.signature == controller.hotKeyID.signature,
+                      receivedID.id == controller.hotKeyID.id else { return OSStatus(eventNotHandledErr) }
                 controller.action()
                 return noErr
             },
@@ -34,8 +46,8 @@ public final class HotKeyController: @unchecked Sendable {
         )
         guard status == noErr else { return false }
         return RegisterEventHotKey(
-            UInt32(kVK_ANSI_D),
-            UInt32(controlKey | optionKey),
+            keyCode,
+            modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
@@ -48,4 +60,3 @@ public final class HotKeyController: @unchecked Sendable {
         if let handlerRef { RemoveEventHandler(handlerRef); self.handlerRef = nil }
     }
 }
-

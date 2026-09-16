@@ -9,6 +9,15 @@ public final class DwightViewModel: ObservableObject {
     @Published public var isPaused = false
     @Published public var dockHeight: CGFloat = 56
     @Published public var userScale: CGFloat = 1
+    @Published public var activityState: DwightActivityState = .walking
+    @Published public var statusText: String?
+    @Published public var accessory: DwightAccessory = .automatic
+    @Published public var weatherMood: WeatherMood = .unknown
+    @Published public var temperature: Int?
+    @Published public var visitor: VisitorKind?
+    @Published public var effectPulse = 0
+    @Published public var miniGameActive = false
+    @Published public var beetScore = 0
 
     public init() {}
 }
@@ -115,19 +124,34 @@ private final class ClickCaptureView: NSView {
     var onGestureChanged: ((Bool, CGPoint) -> Void)?
     var onGestureEnded: ((Bool, CGPoint) -> Void)?
     var onScroll: ((CGFloat) -> Void)?
+    var onSettings: (() -> Void)?
+    var onBeetTap: (() -> Void)?
     private var isDragging = false
     private var isResizing = false
     private var hasBegunGesture = false
+    private var suppressClick = false
     private var startPoint = CGPoint.zero
 
     override func mouseDown(with event: NSEvent) {
+        isDragging = false
+        hasBegunGesture = false
+        suppressClick = false
+        if event.clickCount >= 3 {
+            suppressClick = true
+            onBeetTap?()
+            return
+        }
         if event.clickCount >= 2 {
+            suppressClick = true
             onReset?()
             return
         }
+        if event.modifierFlags.contains(.option) {
+            suppressClick = true
+            onSettings?()
+            return
+        }
         startPoint = NSEvent.mouseLocation
-        isDragging = false
-        hasBegunGesture = false
         isResizing = event.modifierFlags.contains(.shift)
     }
 
@@ -146,7 +170,7 @@ private final class ClickCaptureView: NSView {
     override func mouseUp(with event: NSEvent) {
         if isDragging {
             onGestureEnded?(isResizing, NSEvent.mouseLocation)
-        } else if event.clickCount < 2 {
+        } else if !suppressClick && event.clickCount < 2 {
             onLeftClick?()
         }
     }
@@ -163,6 +187,8 @@ private struct ClickCapture: NSViewRepresentable {
     let onGestureChanged: (Bool, CGPoint) -> Void
     let onGestureEnded: (Bool, CGPoint) -> Void
     let onScroll: (CGFloat) -> Void
+    let onSettings: () -> Void
+    let onBeetTap: () -> Void
 
     func makeNSView(context: Context) -> ClickCaptureView {
         let view = ClickCaptureView()
@@ -173,6 +199,8 @@ private struct ClickCapture: NSViewRepresentable {
         view.onGestureChanged = onGestureChanged
         view.onGestureEnded = onGestureEnded
         view.onScroll = onScroll
+        view.onSettings = onSettings
+        view.onBeetTap = onBeetTap
         return view
     }
 
@@ -184,6 +212,8 @@ private struct ClickCapture: NSViewRepresentable {
         nsView.onGestureChanged = onGestureChanged
         nsView.onGestureEnded = onGestureEnded
         nsView.onScroll = onScroll
+        nsView.onSettings = onSettings
+        nsView.onBeetTap = onBeetTap
     }
 }
 
@@ -196,6 +226,8 @@ public struct DwightView: View {
     let onGestureChanged: (Bool, CGPoint) -> Void
     let onGestureEnded: (Bool, CGPoint) -> Void
     let onScroll: (CGFloat) -> Void
+    let onSettings: () -> Void
+    let onBeetTap: () -> Void
 
     public init(
         model: DwightViewModel,
@@ -205,7 +237,9 @@ public struct DwightView: View {
         onGestureBegan: @escaping (Bool, CGPoint) -> Void,
         onGestureChanged: @escaping (Bool, CGPoint) -> Void,
         onGestureEnded: @escaping (Bool, CGPoint) -> Void,
-        onScroll: @escaping (CGFloat) -> Void
+        onScroll: @escaping (CGFloat) -> Void,
+        onSettings: @escaping () -> Void,
+        onBeetTap: @escaping () -> Void
     ) {
         self.model = model
         self.onSpeak = onSpeak
@@ -215,9 +249,17 @@ public struct DwightView: View {
         self.onGestureChanged = onGestureChanged
         self.onGestureEnded = onGestureEnded
         self.onScroll = onScroll
+        self.onSettings = onSettings
+        self.onBeetTap = onBeetTap
     }
 
     private var spriteName: String {
+        switch model.activityState {
+        case .sleeping: return "dwight_sleeping"
+        case .inspecting, .observing, .focusWarning: return "dwight_inspecting"
+        case .celebrating: return "dwight_celebrating"
+        default: break
+        }
         if model.isPaused { return "dwight_standing" }
         return model.frameIndex == 0 ? "dwight_walk_1" : "dwight_walk_2"
     }
@@ -231,15 +273,42 @@ public struct DwightView: View {
                     speechBubble(quote)
                         .transition(.asymmetric(insertion: .scale(scale: 0.55, anchor: .bottom).combined(with: .opacity), removal: .opacity))
                 } else {
-                    Spacer().frame(height: 64)
+                    statusHeader
+                        .frame(height: 64, alignment: .bottom)
                 }
 
-                SpriteView(
-                    image: DwightAssetLoader.shared.image(named: spriteName),
-                    flipped: model.direction == .left
-                )
-                .frame(width: characterHeight * 0.68, height: characterHeight)
-                .offset(y: model.isPaused ? 0 : (model.frameIndex == 0 ? 1 : -1))
+                ZStack(alignment: .bottom) {
+                    if let visitor = model.visitor {
+                        PixelVisitorView(kind: visitor)
+                            .frame(width: characterHeight * 0.48, height: characterHeight * 0.72)
+                            .offset(x: model.direction == .right ? -characterHeight * 0.48 : characterHeight * 0.48)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    SpriteView(
+                        image: DwightAssetLoader.shared.image(named: spriteName),
+                        flipped: model.direction == .left
+                    )
+                    .frame(width: characterHeight * 0.68, height: characterHeight)
+                    .rotationEffect(.degrees(model.activityState == .carried ? Double(model.direction.rawValue) * 8 : 0))
+                    .scaleEffect(x: model.activityState == .landing ? 1.10 : 1, y: model.activityState == .landing ? 0.88 : 1, anchor: .bottom)
+                    .opacity(model.activityState == .sleeping ? 0.74 : 1)
+                    .offset(y: spriteYOffset)
+
+                    PixelAccessoryView(accessory: resolvedAccessory, weather: model.weatherMood)
+                        .frame(width: characterHeight * 0.50, height: characterHeight * 0.45)
+                        .offset(y: characterHeight * 0.54)
+
+                    if model.activityState == .landing {
+                        LandingDustView(pulse: model.effectPulse)
+                            .frame(width: characterHeight * 1.2, height: 15)
+                    }
+                    if model.miniGameActive {
+                        BeetDrillView(score: model.beetScore, pulse: model.effectPulse)
+                            .frame(width: 132, height: 60)
+                            .offset(y: 20)
+                    }
+                }
             }
             ClickCapture(
                 onLeftClick: onSpeak,
@@ -248,12 +317,54 @@ public struct DwightView: View {
                 onGestureBegan: onGestureBegan,
                 onGestureChanged: onGestureChanged,
                 onGestureEnded: onGestureEnded,
-                onScroll: onScroll
+                onScroll: onScroll,
+                onSettings: onSettings,
+                onBeetTap: onBeetTap
             )
             .frame(width: max(48, characterHeight * 0.82), height: max(48, characterHeight + 8))
         }
         .frame(width: 300, height: 210)
         .animation(.spring(response: 0.32, dampingFraction: 0.72), value: model.quote)
+        .animation(.spring(response: 0.28, dampingFraction: 0.66), value: model.activityState)
+        .animation(.spring(response: 0.4, dampingFraction: 0.72), value: model.visitor)
+    }
+
+    private var spriteYOffset: CGFloat {
+        switch model.activityState {
+        case .carried: return 12
+        case .celebrating: return model.effectPulse.isMultiple(of: 2) ? 5 : 0
+        case .sleeping: return -2
+        default: return model.isPaused ? 0 : (model.frameIndex == 0 ? 1 : -1)
+        }
+    }
+
+    private var resolvedAccessory: DwightAccessory {
+        guard model.accessory == .automatic else { return model.accessory }
+        if model.weatherMood == .snow || model.weatherMood == .rain { return .seasonal }
+        let hour = Calendar.current.component(.hour, from: Date())
+        return hour >= 22 || hour < 6 ? .nightWatch : .classic
+    }
+
+    @ViewBuilder
+    private var statusHeader: some View {
+        if let status = model.statusText {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(model.activityState == .focusWarning ? Color.red : Color(red: 0.22, green: 0.91, blue: 0.78))
+                    .frame(width: 6, height: 6)
+                Text(status)
+                    .font(.system(size: 8, weight: .black, design: .monospaced))
+                    .lineLimit(1)
+                if let temperature = model.temperature { Text("\(temperature)°").font(.system(size: 8, weight: .bold, design: .monospaced)) }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(0.84))
+            .overlay(Rectangle().stroke(model.activityState == .focusWarning ? Color.red : Color(red: 0.96, green: 0.67, blue: 0.08), lineWidth: 2))
+        } else {
+            Color.clear
+        }
     }
 
     private func speechBubble(_ quote: String) -> some View {
@@ -276,5 +387,99 @@ public struct DwightView: View {
             .offset(x: 23)
         }
         .frame(width: 270)
+    }
+}
+
+private struct PixelAccessoryView: View {
+    let accessory: DwightAccessory
+    let weather: WeatherMood
+
+    var body: some View {
+        ZStack {
+            switch accessory {
+            case .automatic, .classic:
+                EmptyView()
+            case .sheriff:
+                Text("★").font(.system(size: 12, weight: .black)).foregroundStyle(Color.yellow)
+                    .background(Rectangle().fill(.black).frame(width: 14, height: 14))
+            case .beetFarmer:
+                VStack(spacing: 0) {
+                    Rectangle().fill(Color(red: 0.26, green: 0.14, blue: 0.07)).frame(width: 24, height: 4)
+                    Rectangle().fill(Color(red: 0.36, green: 0.20, blue: 0.09)).frame(width: 15, height: 7)
+                }
+            case .nightWatch:
+                Text("Z").font(.system(size: 12, weight: .black, design: .monospaced)).foregroundStyle(.cyan).offset(x: 14, y: -6)
+            case .seasonal:
+                Text(weather == .snow ? "❄" : weather == .rain ? "▱" : "◆")
+                    .font(.system(size: 13, weight: .black)).foregroundStyle(weather == .snow ? .white : .cyan)
+            }
+        }
+    }
+}
+
+private struct PixelVisitorView: View {
+    let kind: VisitorKind
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if kind == .cat {
+                HStack(spacing: 5) {
+                    Rectangle().frame(width: 5, height: 7)
+                    Rectangle().frame(width: 5, height: 7)
+                }
+                Rectangle().frame(width: 23, height: 14)
+                HStack(spacing: 12) {
+                    Rectangle().frame(width: 4, height: 9)
+                    Rectangle().frame(width: 4, height: 9)
+                }
+            } else {
+                Rectangle().fill(kind == .prankster ? Color(red: 0.87, green: 0.72, blue: 0.55) : Color(red: 0.65, green: 0.34, blue: 0.18)).frame(width: 18, height: 16)
+                Rectangle().fill(kind == .prankster ? Color(red: 0.30, green: 0.42, blue: 0.56) : Color(red: 0.28, green: 0.38, blue: 0.16)).frame(width: 24, height: 24)
+                HStack(spacing: 6) {
+                    Rectangle().fill(Color(red: 0.16, green: 0.14, blue: 0.14)).frame(width: 7, height: 24)
+                    Rectangle().fill(Color(red: 0.16, green: 0.14, blue: 0.14)).frame(width: 7, height: 24)
+                }
+            }
+        }
+        .foregroundStyle(Color(red: 0.45, green: 0.44, blue: 0.43))
+        .overlay(alignment: .top) {
+            Text(kind == .cat ? "CAT" : kind == .prankster ? "J" : "M")
+                .font(.system(size: 7, weight: .black, design: .monospaced))
+                .foregroundStyle(.white)
+        }
+    }
+}
+
+private struct LandingDustView: View {
+    let pulse: Int
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<5, id: \.self) { index in
+                Rectangle()
+                    .fill(Color.white.opacity(0.55))
+                    .frame(width: index.isMultiple(of: 2) ? 5 : 3, height: 3)
+                    .offset(x: CGFloat(index - 2) * CGFloat(pulse % 3 + 1), y: CGFloat(abs(index - 2)) * -2)
+            }
+        }
+    }
+}
+
+private struct BeetDrillView: View {
+    let score: Int
+    let pulse: Int
+    var body: some View {
+        HStack(spacing: 10) {
+            ForEach(0..<3, id: \.self) { index in
+                VStack(spacing: 0) {
+                    Rectangle().fill(.green).frame(width: 3, height: 6).rotationEffect(.degrees(index == 1 ? 20 : -20))
+                    Circle().fill(Color(red: 0.55, green: 0.06, blue: 0.20)).frame(width: 13, height: 13)
+                }
+                .offset(y: CGFloat((pulse + index) % 3) * -4)
+            }
+            Text("×\(score)").font(.system(size: 9, weight: .black, design: .monospaced)).foregroundStyle(.white)
+        }
+        .padding(5)
+        .background(Color.black.opacity(0.76))
+        .overlay(Rectangle().stroke(Color(red: 0.95, green: 0.68, blue: 0.08), lineWidth: 2))
     }
 }
