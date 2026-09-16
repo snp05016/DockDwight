@@ -12,10 +12,13 @@ let package = Package(
         .target(
             name: "DockDwightLib",
             resources: [.process("Resources")],
-            linkerSettings: [.linkedFramework("Carbon")]
+            linkerSettings: [
+                .linkedFramework("Carbon"),
+                .linkedFramework("IOKit"),
+                .linkedFramework("AVFoundation")
+            ]
         ),
         .executableTarget(name: "DockDwight", dependencies: ["DockDwightLib"]),
         .testTarget(name: "DockDwightTests", dependencies: ["DockDwightLib"])
     ]
 )
-
