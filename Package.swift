@@ -14,7 +14,8 @@ let package = Package(
             resources: [.process("Resources")],
             linkerSettings: [
                 .linkedFramework("Carbon"),
-                .linkedFramework("IOKit")
+                .linkedFramework("IOKit"),
+                .linkedFramework("AVFoundation")
             ]
         ),
         .executableTarget(name: "DockDwight", dependencies: ["DockDwightLib"]),
