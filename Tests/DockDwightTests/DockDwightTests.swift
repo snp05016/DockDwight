@@ -21,5 +21,26 @@ final class DockDwightTests: XCTestCase {
         let first = DwightQuoteBook.quote(at: 2)
         XCTAssertNotEqual(DwightQuoteBook.quote(at: 2, excluding: first), first)
     }
-}
 
+    func testCharacterHeightUsesConfiguredDockTileSize() {
+        XCTAssertEqual(
+            DockGeometry.characterHeight(
+                screenFrame: CGRect(x: 0, y: 0, width: 1920, height: 1080),
+                visibleFrame: CGRect(x: 0, y: 70, width: 1920, height: 1010),
+                configuredTileSize: 56
+            ),
+            56
+        )
+    }
+
+    func testCharacterHeightInfersBottomDockWhenPreferenceUnavailable() {
+        XCTAssertEqual(
+            DockGeometry.characterHeight(
+                screenFrame: CGRect(x: -1920, y: -120, width: 1920, height: 1080),
+                visibleFrame: CGRect(x: -1920, y: -42, width: 1920, height: 1002),
+                configuredTileSize: nil
+            ),
+            66
+        )
+    }
+}

@@ -7,6 +7,8 @@ public final class DwightViewModel: ObservableObject {
     @Published public var direction: PatrolDirection = .right
     @Published public var quote: String?
     @Published public var isPaused = false
+    @Published public var dockHeight: CGFloat = 56
+    @Published public var userScale: CGFloat = 1
 
     public init() {}
 }
@@ -19,19 +21,52 @@ final class DwightAssetLoader: @unchecked Sendable {
         if let cached = cache[name] { return cached }
         #if SWIFT_PACKAGE
         guard let url = Bundle.module.url(forResource: name, withExtension: "png"),
-              let image = NSImage(contentsOf: url) else { return nil }
+              let sourceImage = NSImage(contentsOf: url) else { return nil }
         #else
         guard let url = Bundle.main.url(forResource: name, withExtension: "png"),
-              let image = NSImage(contentsOf: url) else { return nil }
+              let sourceImage = NSImage(contentsOf: url) else { return nil }
         #endif
+        let image = Self.croppedToVisiblePixels(sourceImage) ?? sourceImage
         cache[name] = image
         return image
+    }
+
+    private static func croppedToVisiblePixels(_ image: NSImage) -> NSImage? {
+        var proposed = CGRect(origin: .zero, size: image.size)
+        guard let cgImage = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else { return nil }
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for y in 0..<height {
+            for x in 0..<width where pixels[y * bytesPerRow + x * 4 + 3] > 20 {
+                minX = min(minX, x); minY = min(minY, y)
+                maxX = max(maxX, x); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        let crop = CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+        guard let cropped = cgImage.cropping(to: crop) else { return nil }
+        return NSImage(cgImage: cropped, size: NSSize(width: crop.width, height: crop.height))
     }
 }
 
 private final class NearestSpriteView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
     var flippedHorizontally = false { didSet { needsDisplay = true } }
+    var alternateStride = false { didSet { needsDisplay = true } }
 
     override var isOpaque: Bool { false }
 
@@ -49,7 +84,25 @@ private final class NearestSpriteView: NSView {
             transform.scaleX(by: -1, yBy: 1)
             transform.concat()
         }
+
+        // Render torso and legs separately. Frame two mirrors only the lower body,
+        // producing a true opposite-foot stride without flipping Dwight's facing.
+        let splitY = rect.minY + rect.height * 0.49
+        context.saveGraphicsState()
+        NSBezierPath(rect: CGRect(x: 0, y: splitY, width: bounds.width, height: bounds.height - splitY)).addClip()
         image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.none.rawValue])
+        context.restoreGraphicsState()
+
+        context.saveGraphicsState()
+        NSBezierPath(rect: CGRect(x: 0, y: 0, width: bounds.width, height: splitY)).addClip()
+        if alternateStride {
+            let transform = NSAffineTransform()
+            transform.translateX(by: rect.midX * 2, yBy: 0)
+            transform.scaleX(by: -1, yBy: 1)
+            transform.concat()
+        }
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.none.rawValue])
+        context.restoreGraphicsState()
         context.restoreGraphicsState()
     }
 }
@@ -57,6 +110,7 @@ private final class NearestSpriteView: NSView {
 private struct SpriteView: NSViewRepresentable {
     let image: NSImage?
     let flipped: Bool
+    let alternateStride: Bool
 
     func makeNSView(context: Context) -> NearestSpriteView {
         let view = NearestSpriteView()
@@ -69,30 +123,87 @@ private struct SpriteView: NSViewRepresentable {
     func updateNSView(_ nsView: NearestSpriteView, context: Context) {
         nsView.image = image
         nsView.flippedHorizontally = flipped
+        nsView.alternateStride = alternateStride
     }
 }
 
 private final class ClickCaptureView: NSView {
     var onLeftClick: (() -> Void)?
     var onRightClick: (() -> Void)?
-    override func mouseDown(with event: NSEvent) { onLeftClick?() }
+    var onReset: (() -> Void)?
+    var onGestureBegan: ((Bool, CGPoint) -> Void)?
+    var onGestureChanged: ((Bool, CGPoint) -> Void)?
+    var onGestureEnded: ((Bool, CGPoint) -> Void)?
+    var onScroll: ((CGFloat) -> Void)?
+    private var isDragging = false
+    private var isResizing = false
+    private var hasBegunGesture = false
+    private var startPoint = CGPoint.zero
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            onReset?()
+            return
+        }
+        startPoint = NSEvent.mouseLocation
+        isDragging = false
+        hasBegunGesture = false
+        isResizing = event.modifierFlags.contains(.shift)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let point = NSEvent.mouseLocation
+        if hypot(point.x - startPoint.x, point.y - startPoint.y) > 2 { isDragging = true }
+        if isDragging {
+            if !hasBegunGesture {
+                hasBegunGesture = true
+                onGestureBegan?(isResizing, startPoint)
+            }
+            onGestureChanged?(isResizing, point)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if isDragging {
+            onGestureEnded?(isResizing, NSEvent.mouseLocation)
+        } else if event.clickCount < 2 {
+            onLeftClick?()
+        }
+    }
+
     override func rightMouseDown(with event: NSEvent) { onRightClick?() }
+    override func scrollWheel(with event: NSEvent) { onScroll?(event.scrollingDeltaY) }
 }
 
 private struct ClickCapture: NSViewRepresentable {
     let onLeftClick: () -> Void
     let onRightClick: () -> Void
+    let onReset: () -> Void
+    let onGestureBegan: (Bool, CGPoint) -> Void
+    let onGestureChanged: (Bool, CGPoint) -> Void
+    let onGestureEnded: (Bool, CGPoint) -> Void
+    let onScroll: (CGFloat) -> Void
 
     func makeNSView(context: Context) -> ClickCaptureView {
         let view = ClickCaptureView()
         view.onLeftClick = onLeftClick
         view.onRightClick = onRightClick
+        view.onReset = onReset
+        view.onGestureBegan = onGestureBegan
+        view.onGestureChanged = onGestureChanged
+        view.onGestureEnded = onGestureEnded
+        view.onScroll = onScroll
         return view
     }
 
     func updateNSView(_ nsView: ClickCaptureView, context: Context) {
         nsView.onLeftClick = onLeftClick
         nsView.onRightClick = onRightClick
+        nsView.onReset = onReset
+        nsView.onGestureBegan = onGestureBegan
+        nsView.onGestureChanged = onGestureChanged
+        nsView.onGestureEnded = onGestureEnded
+        nsView.onScroll = onScroll
     }
 }
 
@@ -100,11 +211,30 @@ public struct DwightView: View {
     @ObservedObject var model: DwightViewModel
     let onSpeak: () -> Void
     let onHide: () -> Void
+    let onReset: () -> Void
+    let onGestureBegan: (Bool, CGPoint) -> Void
+    let onGestureChanged: (Bool, CGPoint) -> Void
+    let onGestureEnded: (Bool, CGPoint) -> Void
+    let onScroll: (CGFloat) -> Void
 
-    public init(model: DwightViewModel, onSpeak: @escaping () -> Void, onHide: @escaping () -> Void) {
+    public init(
+        model: DwightViewModel,
+        onSpeak: @escaping () -> Void,
+        onHide: @escaping () -> Void,
+        onReset: @escaping () -> Void,
+        onGestureBegan: @escaping (Bool, CGPoint) -> Void,
+        onGestureChanged: @escaping (Bool, CGPoint) -> Void,
+        onGestureEnded: @escaping (Bool, CGPoint) -> Void,
+        onScroll: @escaping (CGFloat) -> Void
+    ) {
         self.model = model
         self.onSpeak = onSpeak
         self.onHide = onHide
+        self.onReset = onReset
+        self.onGestureBegan = onGestureBegan
+        self.onGestureChanged = onGestureChanged
+        self.onGestureEnded = onGestureEnded
+        self.onScroll = onScroll
     }
 
     private var spriteName: String {
@@ -113,6 +243,7 @@ public struct DwightView: View {
     }
 
     public var body: some View {
+        let characterHeight = model.dockHeight * model.userScale
         ZStack(alignment: .bottom) {
             Color.clear
             VStack(spacing: 0) {
@@ -125,13 +256,22 @@ public struct DwightView: View {
 
                 SpriteView(
                     image: DwightAssetLoader.shared.image(named: spriteName),
-                    flipped: model.direction == .left
+                    flipped: model.direction == .left,
+                    alternateStride: !model.isPaused && model.frameIndex == 1
                 )
-                .frame(width: 90, height: 132)
+                .frame(width: characterHeight * 0.68, height: characterHeight)
                 .offset(y: model.isPaused ? 0 : (model.frameIndex == 0 ? 1 : -1))
             }
-            ClickCapture(onLeftClick: onSpeak, onRightClick: onHide)
-                .frame(width: 106, height: 144)
+            ClickCapture(
+                onLeftClick: onSpeak,
+                onRightClick: onHide,
+                onReset: onReset,
+                onGestureBegan: onGestureBegan,
+                onGestureChanged: onGestureChanged,
+                onGestureEnded: onGestureEnded,
+                onScroll: onScroll
+            )
+            .frame(width: max(48, characterHeight * 0.82), height: max(48, characterHeight + 8))
         }
         .frame(width: 300, height: 210)
         .animation(.spring(response: 0.32, dampingFraction: 0.72), value: model.quote)
