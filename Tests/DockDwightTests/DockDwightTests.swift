@@ -81,4 +81,12 @@ final class DockDwightTests: XCTestCase {
         XCTAssertEqual(WeatherMood.classify(code: 75), .snow)
         XCTAssertEqual(WeatherMood.classify(code: 96), .storm)
     }
+
+    func testQuartzWindowBoundsConvertToAppKitCoordinates() {
+        let rect = WindowAwareness.appKitRect(
+            fromQuartzBounds: CGRect(x: 80, y: 120, width: 640, height: 480),
+            desktopTop: 1_080
+        )
+        XCTAssertEqual(rect, CGRect(x: 80, y: 480, width: 640, height: 480))
+    }
 }

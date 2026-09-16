@@ -47,6 +47,8 @@ public final class DesktopDwightController: NSObject {
     private var lastReactionSource: String?
     private var lastReactionDate = Date.distantPast
     private var focusSessionEnd: Date?
+    private var lastObstacleCheck = Date.distantPast
+    private var lastObstacleName: String?
     private(set) public var isVisible = true
 
     public override init() { super.init() }
@@ -214,6 +216,26 @@ public final class DesktopDwightController: NSObject {
             bounds = patrolBounds(in: screen.frame)
         }
         let next = PatrolEngine.step(state: patrol, deltaTime: delta, speed: CGFloat(settings.walkingSpeed), bounds: bounds)
+        if now.timeIntervalSince(lastObstacleCheck) >= 0.55 {
+            lastObstacleCheck = now
+            let probe = CGPoint(
+                x: next.x + Self.panelSize.width / 2,
+                y: panel.frame.minY + model.dockHeight * model.userScale * 0.55
+            )
+            let obstacle = WindowAwareness.blockingApplication(at: probe)
+            if let obstacle, obstacle != lastObstacleName {
+                lastObstacleName = obstacle
+                patrol.direction = patrol.direction == .right ? .left : .right
+                model.direction = patrol.direction
+                model.activityState = .observing
+                model.statusText = "WINDOW EDGE • \(obstacle.uppercased())"
+                model.effectPulse += 1
+                scheduleStateReset(after: 1.4)
+                return
+            } else if obstacle == nil {
+                lastObstacleName = nil
+            }
+        }
         patrol = next
         model.direction = next.direction
         frameAccumulator += delta
