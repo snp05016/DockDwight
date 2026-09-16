@@ -23,4 +23,4 @@ The app installs to `/Applications/DockDwight.app` and starts automatically at l
 
 ## Sprite provenance
 
-The standing and two walking sprites in `Sources/DockDwightLib/Resources` were produced with the built-in image generation tool from the two user-supplied pixel-art references. The extraction prompts requested one centered full-body pose, preserved clothing and facial details, hard pixel edges, and a transparent background.
+The standing sprite and walk-cycle frames in `Sources/DockDwightLib/Resources` preserve the user-supplied pixel-art references. The stride frame was cleanly extracted from the supplied walk reference; the matching passing-position frame was produced with the built-in image generation tool, normalized to the same height and pixel density, and converted to genuine transparency.

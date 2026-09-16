@@ -66,7 +66,6 @@ final class DwightAssetLoader: @unchecked Sendable {
 private final class NearestSpriteView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
     var flippedHorizontally = false { didSet { needsDisplay = true } }
-    var alternateStride = false { didSet { needsDisplay = true } }
 
     override var isOpaque: Bool { false }
 
@@ -85,24 +84,7 @@ private final class NearestSpriteView: NSView {
             transform.concat()
         }
 
-        // Render torso and legs separately. Frame two mirrors only the lower body,
-        // producing a true opposite-foot stride without flipping Dwight's facing.
-        let splitY = rect.minY + rect.height * 0.49
-        context.saveGraphicsState()
-        NSBezierPath(rect: CGRect(x: 0, y: splitY, width: bounds.width, height: bounds.height - splitY)).addClip()
         image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.none.rawValue])
-        context.restoreGraphicsState()
-
-        context.saveGraphicsState()
-        NSBezierPath(rect: CGRect(x: 0, y: 0, width: bounds.width, height: splitY)).addClip()
-        if alternateStride {
-            let transform = NSAffineTransform()
-            transform.translateX(by: rect.midX * 2, yBy: 0)
-            transform.scaleX(by: -1, yBy: 1)
-            transform.concat()
-        }
-        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.none.rawValue])
-        context.restoreGraphicsState()
         context.restoreGraphicsState()
     }
 }
@@ -110,7 +92,6 @@ private final class NearestSpriteView: NSView {
 private struct SpriteView: NSViewRepresentable {
     let image: NSImage?
     let flipped: Bool
-    let alternateStride: Bool
 
     func makeNSView(context: Context) -> NearestSpriteView {
         let view = NearestSpriteView()
@@ -123,7 +104,6 @@ private struct SpriteView: NSViewRepresentable {
     func updateNSView(_ nsView: NearestSpriteView, context: Context) {
         nsView.image = image
         nsView.flippedHorizontally = flipped
-        nsView.alternateStride = alternateStride
     }
 }
 
@@ -256,8 +236,7 @@ public struct DwightView: View {
 
                 SpriteView(
                     image: DwightAssetLoader.shared.image(named: spriteName),
-                    flipped: model.direction == .left,
-                    alternateStride: !model.isPaused && model.frameIndex == 1
+                    flipped: model.direction == .left
                 )
                 .frame(width: characterHeight * 0.68, height: characterHeight)
                 .offset(y: model.isPaused ? 0 : (model.frameIndex == 0 ? 1 : -1))

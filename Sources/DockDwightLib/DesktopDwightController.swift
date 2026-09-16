@@ -189,7 +189,7 @@ public final class DesktopDwightController {
         patrol = next
         model.direction = next.direction
         frameAccumulator += delta
-        if frameAccumulator >= 0.24 {
+        if frameAccumulator >= 0.16 {
             frameAccumulator = 0
             model.frameIndex = (model.frameIndex + 1) % 2
         }
